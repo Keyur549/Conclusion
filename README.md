@@ -1,3 +1,8 @@
+# 🆕 Projector · Sound · Zone Battle
+- **📺 Projector Mode (Host):** Host screen par nichey jamne 📺 button. Hall na motā screen/TV par kholo (full screen, ✕ ke Esc thi bandh). Lobby ma motu QR + Room Code + Players ni sankhya; prashn vakhte motu prashn, motu Timer ane Zone-wise progress; Result vakhte darek Winner motā akshar ma avatar sathe.
+- **🔊 Sound + Vibration (Player):** Khanu 🔒 thay, chhella 5 second no Timer, navo prashn, Claim ane Winner reveal par avaj ane (Android ma) vibration. Header ma 🔊/🔇 thi bandh/chalu — yaad rahe.
+- **⚔️ Zone vs Zone (Player):** Prashn chalu hoy tyare darek Zone na kitā Players e jawab apyo teni live bar (potano Zone highlight). Epilogue ma Zone Card nā 🔒 pan. Score ke sacho-khoto nathi batavtu — suspense jali rahe.
+
 # 🔊 Question ma Audio (navu)
 - Question ni line ne ante `[audio:geet.mp3]` umero (photo sathe pan: `[img:q1.jpg] [audio:geet.mp3]`). File `public/qaudio/` ma muko (flat upload ma project ni sauthi upar). Online link pan chale: `[audio:https://...mp3]`.
 - Host ni screen par audio auto-play thay. Player ne "🔊 Audio સાંભળો" button dabavvo pade (ek var dabavya pachhi bija question ma auto-play).
@@ -94,11 +99,11 @@ Images આ folder માં છે: `public/scratch/`
 
 | File | Level (Net Score) |
 |---|---|
-| level1.png | 👑 જ્ઞાન સમ્રાટ (20+) |
-| level2.png | 🌟 જ્ઞાન ચેમ્પિયન (15–19) |
-| level3.png | ⭐ તેજસ્વી તારલો (10–14) |
-| level4.png | 🚀 ઉગતો સિતારો (5–9) |
-| level5.png | 🌱 નવું અંકુર (1–4) |
+| level1.png | 👑 જ્ઞાન સમ્રાટ (25+) |
+| level2.png | 🌟 જ્ઞાન ચેમ્પિયન (20–24) |
+| level3.png | ⭐ તેજસ્વી તારલો (15–19) |
+| level4.png | 🚀 ઉગતો સિતારો (10–14) |
+| level5.png | 🌱 નવું અંકુર (1–9) |
 | level6.png | 🔥 સંઘર્ષ યોદ્ધા (0) |
 | level7.png | 💪 હિંમતવાન (0 થી ઓછો) |
 
