@@ -540,8 +540,7 @@ function wcMine(){
 async function cardShare(canvas,fname,title){
   if(fname!=='scratch-message.png') scMarkDl();
   canvas.toBlob(async b=>{ const f=new File([b],fname,{type:'image/png'});
-    if(navigator.canShare && navigator.canShare({files:[f]})){ try{ await navigator.share({files:[f],title}); return; }catch(e){ if(e&&e.name==='AbortError') return; } }
-    const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download=fname; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),5000); },'image/png');
+    const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download=fname; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href),5000); },'image/png');
 }
 function wcMineGo(i){ const d=wcMine()[i]; if(d) cardShare(wcDraw(d),'winner-'+d.k+'.png','જ્ઞાન શોધ Winner'); }
 function wcMineHTML(){
@@ -554,6 +553,7 @@ function reportHtmlMine(){
   const nm=p.baseName||state.name;
   const rows=r.usedIdx.map(qi=>{ const ci=revMap[qi]; const given=ci!==undefined?p.card[ci]:'—'; const ok=ci!==undefined&&r.questions[qi].a===given; const none=ci===undefined;
     return `<tr class="${none?'n':(ok?'g':'b')}"><td>${qi+1}</td><td>${esc(r.questions[qi].q)}</td><td>${esc(given)}</td><td>${ok||none?'—':esc(r.questions[qi].a)}</td><td class="ic">${none?'—':(ok?'✅':'❌')}</td><td class="ic">${cardTags(r,p,res,qi)}</td></tr>`; }).join('');
+  const cells5=Array.from({length:25},(_,i)=>{ const qi=p.marks[i]; const st=qi===undefined?'':(p.card[i]===r.questions[qi].a?'green':'red'); return `<div class="c5 ${st}">${esc(p.card[i])}</div>`; }).join('');
   const html=`<!doctype html><html lang="gu"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(nm)} – Report | જ્ઞાન શોધ</title>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Gujarati:wght@400;600;800&display=swap" rel="stylesheet">
 <style>*{box-sizing:border-box}body{margin:0;padding:16px;background:linear-gradient(180deg,#f7fcfb,#dff3ef);color:#0f172a;font-family:'Noto Sans Gujarati','Shruti','Nirmala UI','Segoe UI',system-ui,sans-serif;line-height:1.5}
@@ -565,9 +565,10 @@ h1{margin:0;text-align:center;color:#0f766e;font-size:1.7rem}.sub{text-align:cen
 table{width:100%;border-collapse:collapse;font-size:.88rem}th{background:#0f766e;color:#fff;padding:7px 6px;text-align:left}td{padding:7px 6px;border-bottom:1px solid #d5e8e4;vertical-align:top}
 tr.g td:nth-child(3){color:#15803d;font-weight:600}tr.b td:nth-child(3){color:#b91c1c;font-weight:600}tr.b td:nth-child(4){color:#15803d;font-weight:600}tr.n td{color:#94a3b8}.ic{text-align:center}
 .ft{text-align:center;color:#475569;font-size:.8rem;margin-top:14px}.pr{display:block;margin:14px auto 0;padding:10px 20px;border:0;border-radius:12px;background:#0f766e;color:#fff;font:inherit;font-weight:700;cursor:pointer}
-@media print{body{background:#fff;padding:0}.pr{display:none}.wrap{box-shadow:none}}</style></head><body><div class="wrap">
+.grid{display:grid;grid-template-columns:repeat(5,1fr);gap:4px;margin:12px 0}.c5{aspect-ratio:1;display:flex;align-items:center;justify-content:center;text-align:center;font-size:.72rem;font-weight:600;padding:3px;border-radius:8px;background:#e5e7eb}.c5.green{background:#16a34a;color:#fff}.c5.red{background:#dc2626;color:#fff}@media print{body{background:#fff;padding:0}.pr{display:none}.wrap{box-shadow:none}}</style></head><body><div class="wrap">
 <h1>જ્ઞાન શોધ</h1><div class="sub">મારો Report Card</div><div class="av">${esc(p.avatar||'🦁')}</div><div class="nm">${esc(nm)}</div>${p.zone?`<div class="zn">Zone: ${esc(p.zone)}</div>`:''}
 <div class="st"><div><b style="color:${res.netScore<0?'#dc2626':'#0f766e'}">${res.netScore}</b><span>🎯 Net Score</span></div><div><b style="color:#15803d">${res.correctCount}</b><span>✅ સાચા</span></div><div><b style="color:#dc2626">${res.wrongCount}</b><span>❌ ખોટા</span></div><div><b style="color:#b45309">${res.fastCount}</b><span>⚡ Fast</span></div><div><b style="color:#7c3aed">${res.streakBonus}</b><span>🏆 Streak</span></div><div><b style="color:#b45309">${res.correctRows}</b><span>📏 Line</span></div></div>
+<h3 style="color:#0f766e;margin:18px 0 6px">🎴 મારું 5×5 Card</h3><div class="grid">${cells5}</div>
 <table><tr><th>#</th><th>Question</th><th>તમારો જવાબ</th><th>સાચો જવાબ</th><th></th><th>⚡/Card</th></tr>${rows}</table>
 <div class="ft" style="margin-top:8px">⚡ Fast Bonus: ${res.fastCount} (+${res.fastCount}) · 🏆 Streak: ${p.cards&&p.cards.streak!=null?(res.streakOk?'સફળ +'+res.streakBonus:'સફળ ન થઈ'):'વાપરી નથી'} · 🛡 બચાવ: ${res.shieldSaved}</div>
 <div class="ft">Net Score = સાચા − ખોટા + ⚡ Fast + 🏆 Streak · Room ${esc(r.code)}</div><button class="pr" onclick="window.print()">🖨 Print / PDF</button></div></body></html>`;
@@ -579,8 +580,7 @@ async function tyMine(){
   const d={name:pl.baseName||state.name, zone:pl.zone||'', avatar:pl.avatar, stat:'સાચા જવાબ '+res.correctCount+' · Net Score '+res.netScore, code:r.code};
   tyCanvas(d).toBlob(async b=>{
     const f=new File([b],'thankyou.png',{type:'image/png'});
-    if(navigator.canShare && navigator.canShare({files:[f]})){ try{ await navigator.share({files:[f],title:'ધન્યવાદ'}); return; }catch(e){ if(e&&e.name==='AbortError') return; } }
-    const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download='thankyou.png'; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),5000);
+    const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download='thankyou.png'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href),5000);
   },'image/png');
 }
 
