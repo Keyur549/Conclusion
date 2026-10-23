@@ -1766,6 +1766,7 @@ socket.on('connect', ()=>{ if(state.code) subscribe(); });
 
 function hostStart(){ socket.emit('host:start',{code:state.code}); }
 function hostSpin(){ if(spinning) return; socket.emit('host:spin',{code:state.code}); }
+function hostSkipBet(){ socket.emit('host:skipBet',{code:state.code}); }
 function hostEnd(){ socket.emit('host:end',{code:state.code}); }
 
 
@@ -2038,7 +2039,7 @@ async function downloadExcel(){
 
     const wonCats = WINNER_ORDER.filter(k=>k!=='zone'&&w[k]===name).map(k=>WINNER_LABELS[k]);
     return {name, zone:p.zone||'', avatar:p.avatar||'', correct:res.correctCount,
-      wrong:res.cellState.filter(s=>s==='red').length, netScore:res.netScore, fast:res.fastCount, streak:(r.players[name].cards&&r.players[name].cards.streak!=null)?(res.streakOk?'સફળ (+10)':'નિષ્ફળ'):'—', shield:(r.players[name].cards&&r.players[name].cards.shield!=null)?(res.shieldSaved?'બચાવ્યું':'વાપર્યું'):'—', validLines, invalidLines,
+      wrong:res.cellState.filter(s=>s==='red').length, netScore:res.netScore, betPts:res.betPts||0, speedPts:res.speedPts||0, fast:res.fastCount, streak:(r.players[name].cards&&r.players[name].cards.streak!=null)?(res.streakOk?'સફળ (+10)':'નિષ્ફળ'):'—', shield:(r.players[name].cards&&r.players[name].cards.shield!=null)?(res.shieldSaved?'બચાવ્યું':'વાપર્યું'):'—', validLines, invalidLines,
       fullHouse:res.fullHouse?'Yes':'No', 
       lineWinner: wonCats.length?wonCats.join(', '):'—',
       winTime: wonCats.length?WINNER_ORDER.filter(k=>w[k]===name&&!/^top/.test(k)&&k!=='zone').map(k=>WINNER_LABELS[k]+': '+fmtDur(w[k+'_ms'])).join(' | '):'—'};
@@ -2050,7 +2051,7 @@ async function downloadExcel(){
   ws.columns=[
     {header:'Rank',key:'rank',width:7},{header:'Player',key:'name',width:20},{header:'Zone',key:'zone',width:16},
     {header:'Avatar',key:'avatar',width:8},{header:'Correct',key:'correct',width:10},{header:'Wrong',key:'wrong',width:10},
-    {header:'Net Score',key:'netScore',width:11},{header:'⚡ Fast',key:'fast',width:8},{header:'🏆 Streak',key:'streak',width:12},{header:'🛡 Shield',key:'shield',width:11},
+    {header:'Net Score',key:'netScore',width:11},{header:'⚡ Fast',key:'fast',width:8},{header:'🏆 Streak',key:'streak',width:12},{header:'💰 Bet ±',key:'betPts',width:9},{header:'⚡ Speed',key:'speedPts',width:9},{header:'🛡 Shield',key:'shield',width:11},
     {header:'Valid Lines',key:'validLines',width:12},{header:'Invalid Lines',key:'invalidLines',width:13},
     {header:'Full House',key:'fullHouse',width:12},
     {header:'Line Winner',key:'lineWinner',width:22},
@@ -2138,6 +2139,27 @@ async function downloadExcel(){
 }
 // ===== Power Cards / Fast Bonus / Bonus Streak scoring (same rules as server.js) =====
 const STREAK_LEN=3, STREAK_BONUS=10, FAST_BONUS=1;
+
+// ---- Phases / Fast-Round Bet / Top-3 speed (same rules as server.js) ----
+const PHASE_LEN = 9, BET_WIN = 10, BET_LOSE = -5, SPEED_PTS = [3,2,1], BET_MS = 8000, FAST_SEC = 20;
+function qPos(r,qi){ return (r.usedIdx||[]).indexOf(qi); }
+function isFastQ(r,qi){ const i=qPos(r,qi); return i>=0 && (i+1)%PHASE_LEN===0; }
+function betSpeed(r,p,pname,cellState,fm){
+  let betPts=0, speedPts=0; const bets=[]; const sp=(fm&&fm.__speed)||{};
+  Object.keys(sp).forEach(qi=>{ const k=(sp[qi]||[]).indexOf(pname); if(k>=0) speedPts+=SPEED_PTS[k]; });
+  Object.keys(p.bets||{}).forEach(k=>{ const qi=+k; if(!p.bets[k]) return;
+    if(!answerOnCard(r,p,qi)){ bets.push({qi,res:'void',pts:0}); return; }   // answer not on this player's card => bet cancelled, no loss
+    const ci=markCell(p,qi), win=ci!==undefined && cellState[ci]==='green', shieldHere=(p.cards||{}).shield===qi;
+    const base = ci===undefined ? 0 : (win ? 1 : (shieldHere ? 0 : -1));
+    const pts = win ? BET_WIN : BET_LOSE; betPts += pts-base; bets.push({qi,res:win?'win':'lose',pts}); });
+  return {betPts,speedPts,bets};
+}
+
+function phaseInfo(r){ const i=r.curIdx!=null?qPos(r,r.curIdx):-1, n=(r.usedIdx||[]).length, tot=Math.max(1,Math.ceil((r.questions||[]).length/PHASE_LEN));
+  const ph=i>=0?Math.floor(i/PHASE_LEN)+1:Math.floor(n/PHASE_LEN)+1; return {ph:Math.min(ph,tot),tot,fast:i>=0&&isFastQ(r,r.curIdx),k:i>=0?(i%PHASE_LEN)+1:0}; }
+function phaseDone(r){ const n=(r.usedIdx||[]).length; return n>0 && n%PHASE_LEN===0 && n<(r.questions||[]).length; }
+function phLabel(r){ const x=phaseInfo(r); return x.fast?('⚡ FAST ROUND · PHASE '+x.ph):('PHASE '+x.ph+' · પ્રશ્ન '+x.k+'/'+(PHASE_LEN-1)); }
+
 function markCell(p,qi){ const k=Object.keys(p.marks).find(k=>p.marks[k]===qi); return k===undefined?undefined:+k; }
 function answerOnCard(r,p,qi){ const q=r.questions[qi]; return !!(q&&q.a!==undefined&&p.card.includes(q.a)); }
 function streakSlotsFull(r,p){
@@ -2146,12 +2168,13 @@ function streakSlotsFull(r,p){
   const out=[]; for(let i=pos;i<r.usedIdx.length&&out.length<STREAK_LEN;i++){ const qi=r.usedIdx[i]; if(answerOnCard(r,p,qi)) out.push(qi); } return out;
 }
 function fastMapC(r){
-  if(r._fm) return r._fm; const fm={};
-  (r.usedIdx||[]).forEach(qi=>{ const q=r.questions[qi]; if(!q||q.a===undefined) return; let best=null;
+  if(r._fm) return r._fm; const fm={}, speed={};
+  (r.usedIdx||[]).forEach(qi=>{ const q=r.questions[qi]; if(!q||q.a===undefined) return; let best=null; const list=[], fast=isFastQ(r,qi);
     for(const [n,p] of Object.entries(r.players)){ const ci=markCell(p,qi); if(ci===undefined||q.a!==p.card[ci]) continue; const ts=(p.markTs||{})[qi]; if(ts==null) continue;
+      if(fast){ if(!(p.bets&&p.bets[qi])) list.push({n,ts,j:p.joinedAt}); continue; }
       if(!best||ts<best.ts||(ts===best.ts&&p.joinedAt<best.j)) best={n,ts,j:p.joinedAt}; }
-    if(best) fm[qi]=best.n; });
-  r._fm=fm; return fm;
+    if(fast){ list.sort((x,y)=>x.ts-y.ts||x.j-y.j); speed[qi]=list.slice(0,SPEED_PTS.length).map(x=>x.n); } else if(best) fm[qi]=best.n; });
+  fm.__speed=speed; r._fm=fm; return fm;
 }
 function scoreExtra(r,pname,cellState,correctCount,wrongCount){
   const p=r.players[pname], fm=fastMapC(r), cards=p.cards||{};
@@ -2161,14 +2184,16 @@ function scoreExtra(r,pname,cellState,correctCount,wrongCount){
   const slots=streakSlotsFull(r,p);
   const streakRes=slots.map(qi=>{ const ci=markCell(p,qi); return ci===undefined?'miss':(cellState[ci]==='green'?'ok':'bad'); });
   const streakOk=slots.length===STREAK_LEN&&streakRes.every(x=>x==='ok');
-  return {shieldSaved,fastQs,fastCount:fastQs.length,streakSlots:slots,streakRes,streakOk,streakBonus:streakOk?STREAK_BONUS:0,
-    netScore:correctCount-(wrongCount-shieldSaved)+fastQs.length*FAST_BONUS+(streakOk?STREAK_BONUS:0)};
+  const bs=betSpeed(r,p,pname,cellState,fm);
+  return {shieldSaved,fastQs,fastCount:fastQs.length,streakSlots:slots,streakRes,streakOk,streakBonus:streakOk?STREAK_BONUS:0,betPts:bs.betPts,speedPts:bs.speedPts,betRes:bs.bets,
+    netScore:correctCount-(wrongCount-shieldSaved)+fastQs.length*FAST_BONUS+(streakOk?STREAK_BONUS:0)+bs.betPts+bs.speedPts};
 }
 function cardTags(r,p,res,qi){
   const c=p.cards||{}, t=[];
   if(c.shield===qi) t.push('🛡'); if(c.fifty===qi) t.push('✂️'); if(c.change===qi) t.push('🔄'); if(c.streak===qi) t.push('🏆'); if(c.copy===qi) t.push('👥');
   const si=res.streakSlots.indexOf(qi); if(si>=0) t.push('S'+(si+1));
   if(res.fastQs.includes(qi)) t.push('⚡+1');
+  if((p.bets||{})[qi]) t.push('💰'); const bq=(res.betRes||[]).find(x=>x.qi===qi); if(bq) t.push(bq.res==='win'?'+10':bq.res==='lose'?'−5':'(Bet રદ)');
   return t.join(' ');
 }
 function playerResults(r,pname){
@@ -2275,7 +2300,7 @@ function render(){
   else if(r.status==='active'||r.status==='locked'){
     body+=`<div class="card" style="text-align:center">${wheelSVG(wheelLayout,wheelRotation,pendingReveal)}
     <div class="muted" style="margin:6px 0">⏱ Question Time: ${[10,15,20,30,45].map(s=>`<button class="btn ${(r.qSec||30)===s?'':'ghost'}" style="padding:4px 10px;min-width:0;margin:2px" onclick="hostSetTimer(${s})">${s}s</button>`).join('')}</div>
-    <button class="btn" onclick="hostSpin()" ${spinning?'disabled':''}>🎡 Spin Wheel</button> <button class="btn ghost" onclick="hostEnd()">End Game</button>${r.status==='locked'?' <button class="btn ghost" onclick="hostUndo()">↩️ છેલ્લો Question Undo</button>':''}<div class="muted">Used: ${r.usedIdx.length}/${r.questions.length}</div></div>`;
+    ${(r.status==='locked'&&phaseDone(r))?`<div class="qtext" style="background:#e6f4f1">🏁 PHASE ${phaseInfo(r).ph} પૂરો</div>`:''}<button class="btn" onclick="hostSpin()" ${spinning?'disabled':''}>${(r.status==='locked'&&phaseDone(r))?'▶ PHASE '+(Math.floor((r.usedIdx||[]).length/PHASE_LEN)+1)+' શરૂ કરો':'🎡 Spin Wheel'}</button> <button class="btn ghost" onclick="hostEnd()">End Game</button>${r.status==='locked'?' <button class="btn ghost" onclick="hostUndo()">↩️ છેલ્લો Question Undo</button>':''}<div class="muted">Used: ${r.usedIdx.length}/${r.questions.length}</div></div>`;
   }
   else if(r.status==='spinning'){
     body+=`<div class="card" style="text-align:center">${wheelSVG(wheelLayout,wheelRotation,pendingReveal)}
@@ -2284,6 +2309,7 @@ function render(){
   else if(r.status==='revealing'){
     body+=`<div class="card" style="text-align:center">${wheelSVG(wheelLayout,wheelRotation,pendingReveal)}</div>`;
     body+=`<div class="card numpop"><div class="lbl">🎯 Question Number</div><div class="num">${numberPopup!=null?numberPopup:(r.curIdx+1)}</div></div>`;
+    if(r.betEnd&&isFastQ(r,r.curIdx)){ const nb=Object.values(r.players).filter(x=>x.bets&&x.bets[r.curIdx]).length; body+=`<div class="card" style="text-align:center"><b>⚡ FAST ROUND · PHASE ${phaseInfo(r).ph}</b><div class="timer">${Math.max(0,Math.ceil((r.betEnd-Date.now())/1000))}s</div><div class="qtext">💰 ${nb} Players એ Bet લગાવી</div><button class="btn" style="background:#f59e0b;color:#3b2a00" onclick="hostSkipBet()">⏭ Bet બંધ કરો, પ્રશ્ન બતાવો</button></div>`; }
   }
   else if(r.status==='question'){
     body+=`<div class="card" style="text-align:center">${wheelSVG(wheelLayout,wheelRotation,pendingReveal)}</div>`;
@@ -2310,9 +2336,9 @@ function render(){
     <button class="btn secondary" onclick="downloadExcel()">⬇ Excel Report (.xlsx)</button></div>`;
     body+=zoneTableHTML(r,n=>playerResults(r,n));
     body+=`<div class="card overflow"><h2>Player Results</h2><div class="muted">Net Score = Correct − Wrong (negative marking)</div><table class="stbl">
-    <tr><th align="left">Player</th><th>Correct</th><th>Wrong</th><th>⚡</th><th>🏆</th><th>Net</th><th>Lines</th><th>Full</th></tr>
+    <tr><th align="left">Player</th><th>Correct</th><th>Wrong</th><th>⚡</th><th>🏆</th><th>💰Bet</th><th>⚡Speed</th><th>Net</th><th>Lines</th><th>Full</th></tr>
     ${Object.keys(r.players).map(n=>({n,res:playerResults(r,n)})).sort((a,b)=>b.res.netScore-a.res.netScore).map(({n,res})=>{
-    return `<tr><td>${esc(n)}</td><td align="center">${res.correctCount}</td><td align="center">${res.wrongCount}</td><td align="center">${res.fastCount}</td><td align="center">${res.streakBonus?'🏆':'—'}</td><td align="center" style="color:${res.netScore<0?'#dc2626':'#16a34a'};font-weight:700">${res.netScore}</td><td align="center">${res.correctRows}</td><td align="center">${res.fullHouse?'✔':'—'}</td></tr>`;}).join('')}
+    return `<tr><td>${esc(n)}</td><td align="center">${res.correctCount}</td><td align="center">${res.wrongCount}</td><td align="center">${res.fastCount}</td><td align="center">${res.streakBonus?'🏆':'—'}</td><td align="center">${res.betPts||0}</td><td align="center">${res.speedPts||0}</td><td align="center" style="color:${res.netScore<0?'#dc2626':'#16a34a'};font-weight:700">${res.netScore}</td><td align="center">${res.correctRows}</td><td align="center">${res.fullHouse?'✔':'—'}</td></tr>`;}).join('')}
     </table></div>`;
   }
   el.innerHTML=body;
@@ -2400,7 +2426,8 @@ function pvAnnounce(r){var O=(typeof WINNER_ORDER!=='undefined')?WINNER_ORDER:[]
  function btn(a,t,c){return '<button data-act="'+a+'"'+(c?' class="'+c+'"':'')+'>'+t+'</button>'}
  function ctl(r){var st=r.status,b='';
   if(st==='lobby')b=(r.joinEnd?btn('jtp','＋1 મિનિટ')+btn('jtx','⏹ Timer બંધ','sk'):btn('jt5','⏱ 5:00 Join Timer શરૂ'))+btn('start','▶ Game શરૂ કરો','go');
-  else if(st==='active'||st==='locked')b=btn('spin','🎡 SPIN','go')+(st==='locked'?'':'')+btn('end','🏁 Game પૂરી','sk');
+  else if(st==='active'||st==='locked')b=btn('spin',(st==='locked'&&phaseDone(r))?'▶ PHASE '+(Math.floor((r.usedIdx||[]).length/PHASE_LEN)+1)+' શરૂ કરો':'🎡 SPIN','go')+btn('end','🏁 Game પૂરી','sk');
+  else if(st==='revealing'&&r.betEnd)b=btn('skipbet','⏭ Bet બંધ કરો','sk');
   else if(st==='question')b=(r.paused?btn('resume','▶ Resume','go'):btn('pause','⏸ Pause'))+btn('skip','⏭ Time Skip','sk');
   else if(st==='ended')b=btn('reveal','🏆 Result Reveal કરો','go')+btn('dash','📊 Dashboard','sk');
   else if(st==='box'){var lastR=(r.round||0)>=(((r.cfg&&r.cfg.rounds)||7)-1);b=btn('nextround',lastR?'🏁 છેલ્લો Round પૂરો':'➡️ Next Round (નવું Wheel)','go')+btn('end','🏁 Game પૂરી','sk')}
@@ -2418,12 +2445,13 @@ function pvAnnounce(r){var O=(typeof WINNER_ORDER!=='undefined')?WINNER_ORDER:[]
   return (o||tie)?'<div class="pjclaim">'+o+(tie?'<small>⚖️ Tie-break: '+esc2(tie===true?'સૌથી પહેલા Claim':tie)+'</small>':'')+'</div>':''}
  function html(r){var st=r.status;
   if(st==='active'||st==='spinning'||st==='revealing'||st==='locked'){
-   return '<div class="pjh">જ્ઞાન શોધ</div>'+(r.round!=null?'<div class="pjs">ROUND '+((r.round||0)+1)+'</div>':'')+(st==='locked'?'<div class="pjfire" style="background:linear-gradient(90deg,#475569,#1e293b);box-shadow:none;animation:none">⏱ સમય પૂરો — હવે Spin દબાવો</div>':'')+stage(r)+(st==='active'&&!(r.usedIdx||[]).length?'<div class="pjs">Game શરૂ થાય છે…</div>':'')+(st==='revealing'?'<div class="pjs">હવે પ્રશ્ન આવે છે…</div>':'')+bars(r)+ctl(r)}
+   var fastB=(st==='revealing'&&r.betEnd&&isFastQ(r,r.curIdx)),pdn=(st==='locked'&&phaseDone(r)),betN=fastB?Object.values(r.players||{}).filter(function(x){return x.bets&&x.bets[r.curIdx]}).length:0,betL=fastB?Math.max(0,Math.ceil((r.betEnd-Date.now())/1000)):0;
+   return '<div class="pjh">જ્ઞાન શોધ</div>'+(fastB?'<div class="pjfire">⚡ FAST ROUND · PHASE '+phaseInfo(r).ph+' — 💰 Bet લગાવવાનો સમય '+betL+'s</div>':(pdn?'<div class="pjfire" style="background:linear-gradient(90deg,#0f766e,#14532d);animation:none">🏁 PHASE '+phaseInfo(r).ph+' પૂરો — હવે PHASE '+(Math.floor((r.usedIdx||[]).length/PHASE_LEN)+1)+' શરૂ કરો</div>':(st==='revealing'||st==='locked')&&r.curIdx!=null?'<div class="pjs">'+esc2(phLabel(r))+'</div>':''))+(st==='locked'&&!pdn?'<div class="pjfire" style="background:linear-gradient(90deg,#475569,#1e293b);box-shadow:none;animation:none">⏱ સમય પૂરો — હવે Spin દબાવો</div>':'')+stage(r)+(st==='active'&&!(r.usedIdx||[]).length?'<div class="pjs">Game શરૂ થાય છે…</div>':'')+(st==='revealing'?(fastB?'<div class="pjs">💰 '+betN+' Players એ Bet લગાવી · પ્રશ્ન હજી છુપો છે…</div>':'<div class="pjs">હવે પ્રશ્ન આવે છે…</div>'):'')+bars(r)+ctl(r)}
   if(st==='box'){var pk=0,tp=Object.keys(r.players||{}),rm=Math.max(0,Math.ceil(((r.boxEnd||0)-Date.now())/1000));tp.forEach(function(n){if(((r.players[n].boxPick||[])[r.round])!=null)pk++});
    return '<div class="pjh">જ્ઞાન શોધ</div><div class="pjs">ROUND '+((r.round||0)+1)+' પૂરો</div><div class="pjbig">🎁</div><div class="pjs">Mystery Box</div><div class="pjt'+(rm<=10&&!r.boxAuto?' lo':'')+'">'+(r.boxAuto?'⏱':rm+'s')+'</div><div class="pjs">✅ '+pk+' / '+tp.length+' Players એ Box પસંદ કર્યું</div>'+ctl(r)}
   if(st==='opening')return '<div class="pjh">જ્ઞાન શોધ</div><div class="pjbig">🏁</div><div class="pjs">બધા Round પૂરા</div><div class="pjs">Mystery Box ના Result Players ને દેખાય છે</div>'+ctl(r)
   var h=html0(r);
-  if(st==='question'){h=h.replace(/<div class="pjs">પ્રશ્ન \d+[^<]*<\/div>/,r.round!=null?'<div class="pjs">Round '+((r.round||0)+1)+'</div>':'')}
+  if(st==='question'){h=h.replace(/<div class="pjs">પ્રશ્ન \d+[^<]*<\/div>/,'<div class="pjs">'+esc2(phLabel(r))+'</div>')}
   if(st==='lobby'){h=h.replace('<div class="pjrow">','<div id="pjjw"></div><div class="pjrow">')}
   if(st==='question'&&!r.paused){h=h.replace('<div class="pjh">',fireChk(r)+'<div class="pjh">')}
   if((st==='question'||st==='locked')&&r.curIdx!=null)h=h.replace('<div class="pjh">','<div class="pjchip">🎡 નંબર '+(r.curIdx+1)+'</div><div class="pjh">');
@@ -2463,7 +2491,7 @@ function pvAnnounce(r){var O=(typeof WINNER_ORDER!=='undefined')?WINNER_ORDER:[]
  function paint(){paint0();var oo=document.getElementById('pj');if(open&&oo){var bd=oo.querySelector('.pjon'),nb=onBadge();if(!nb){if(bd)bd.remove()}else if(bd){if(bd.outerHTML!==nb)bd.outerHTML=nb}else oo.insertAdjacentHTML('afterbegin',nb)}var o=document.getElementById('pj'),r=(typeof state!=='undefined')&&state.room;if(open&&o&&r&&r.status==='lobby'){var w=o.querySelector('#pjjw');if(w)w.innerHTML=jtHTML(r)}}
  function paint0(){if(!open)return;if(typeof spinning!=="undefined"&&spinning)return;var r=(typeof state!=='undefined')&&state.room;var o=document.getElementById('pj');if(!o||!r)return;pvAnnounce(r);sfxTick(r);var h=html(r);var jw=o.querySelector('#pjjw');if(h!==last){last=h;o.querySelector('.pjin').innerHTML=h}}
  function toggle(on){open=(on===undefined)?!open:on;var o=document.getElementById('pj');o.style.display=open?'flex':'none';if(open){last='';paint();try{var de=document.documentElement;if(de.requestFullscreen)de.requestFullscreen()}catch(e){}iv=setInterval(paint,500);onPoll();onT=setInterval(onPoll,3000)}else{clearInterval(iv);clearInterval(onT);try{o.querySelector('.pjin').innerHTML='';last=''}catch(e){}try{if(document.fullscreenElement)document.exitFullscreen()}catch(e){}}}
- function init(){var o=document.createElement('div');o.id='pj';o.style.display='none';o.innerHTML='<button class="pjx" aria-label="Close">✕</button><button class="pjv" aria-label="Voice">🔊</button><div class="pjin"></div>';o.querySelector('.pjv').onclick=function(){PV.on=!PV.on;this.textContent=PV.on?'🔊':'🔇';try{speechSynthesis.cancel()}catch(e){}};document.body.insertBefore(o,document.body.firstChild);o.querySelector('.pjin').onclick=function(e){var t=e.target.closest&&e.target.closest('[data-act]');if(!t)return;var a=t.getAttribute('data-act'),f={start:'hostStart',spin:'hostSpin',pause:'hostPause',resume:'hostResume',skip:'hostSkipTimer',reveal:'hostReveal',next:'hostNextWinner',end:'hostEnd',startbox:'hostStartBox',nextround:'hostNextRound',dash:'openDashboard',xls:'downloadExcel'}[a];if(a==='sc'){var r3=state.room;hostScReveal(!(r3&&r3.scReveal));return}if(a&&a.indexOf('draw_')===0){hostSetDraw(a.slice(5));return}if(a==='jt5'){socket.emit('host:joinTimer',{code:state.code,sec:300});return}if(a==='jtp'){var rr=state.room,rm=Math.max(0,Math.ceil(((rr&&rr.joinEnd||0)-Date.now())/1000));socket.emit('host:joinTimer',{code:state.code,sec:rm+60});return}if(a==='jtx'){socket.emit('host:joinTimer',{code:state.code,sec:0});return}try{if(f&&typeof window[f]==='function')window[f]();else if(f)eval(f+'()')}catch(x){}};o.querySelector('.pjx').onclick=function(){toggle(false)};
+ function init(){var o=document.createElement('div');o.id='pj';o.style.display='none';o.innerHTML='<button class="pjx" aria-label="Close">✕</button><button class="pjv" aria-label="Voice">🔊</button><div class="pjin"></div>';o.querySelector('.pjv').onclick=function(){PV.on=!PV.on;this.textContent=PV.on?'🔊':'🔇';try{speechSynthesis.cancel()}catch(e){}};document.body.insertBefore(o,document.body.firstChild);o.querySelector('.pjin').onclick=function(e){var t=e.target.closest&&e.target.closest('[data-act]');if(!t)return;var a=t.getAttribute('data-act'),f={start:'hostStart',spin:'hostSpin',pause:'hostPause',resume:'hostResume',skip:'hostSkipTimer',reveal:'hostReveal',next:'hostNextWinner',end:'hostEnd',startbox:'hostStartBox',nextround:'hostNextRound',dash:'openDashboard',xls:'downloadExcel',skipbet:'hostSkipBet'}[a];if(a==='sc'){var r3=state.room;hostScReveal(!(r3&&r3.scReveal));return}if(a&&a.indexOf('draw_')===0){hostSetDraw(a.slice(5));return}if(a==='jt5'){socket.emit('host:joinTimer',{code:state.code,sec:300});return}if(a==='jtp'){var rr=state.room,rm=Math.max(0,Math.ceil(((rr&&rr.joinEnd||0)-Date.now())/1000));socket.emit('host:joinTimer',{code:state.code,sec:rm+60});return}if(a==='jtx'){socket.emit('host:joinTimer',{code:state.code,sec:0});return}try{if(f&&typeof window[f]==='function')window[f]();else if(f)eval(f+'()')}catch(x){}};o.querySelector('.pjx').onclick=function(){toggle(false)};
   var b=document.createElement('button');b.id='hproj';b.type='button';b.setAttribute('aria-label','Projector');b.textContent='📺';b.onclick=function(){toggle(true)};document.body.appendChild(b);
   document.addEventListener('keydown',function(e){if(e.key==='Escape'&&open)toggle(false)});document.addEventListener('fullscreenchange',function(){if(open&&!document.fullscreenElement){}})}
  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();

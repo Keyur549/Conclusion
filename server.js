@@ -117,6 +117,21 @@ const rooms = {}; // code -> room object
 
 // ---------- Power Cards, Fast Bonus, Bonus Streak ----------
 const STREAK_LEN = 3, STREAK_BONUS = 10, FAST_BONUS = 1;
+
+// ---------- Phases (8 normal + 1 ⚡ Fast Round) · Fast-Round Bet · Top-3 speed bonus ----------
+const PHASE_LEN = 9, BET_WIN = 10, BET_LOSE = -5, SPEED_PTS = [3,2,1], BET_MS = 8000, FAST_SEC = 20;
+function qPos(r,qi){ return (r.usedIdx||[]).indexOf(qi); }
+function isFastQ(r,qi){ const i=qPos(r,qi); return i>=0 && (i+1)%PHASE_LEN===0; }
+function betSpeed(r,p,pname,cellState,fm){
+  let betPts=0, speedPts=0; const bets=[]; const sp=(fm&&fm.__speed)||{};
+  Object.keys(sp).forEach(qi=>{ const k=(sp[qi]||[]).indexOf(pname); if(k>=0) speedPts+=SPEED_PTS[k]; });
+  Object.keys(p.bets||{}).forEach(k=>{ const qi=+k; if(!p.bets[k]) return;
+    if(!answerOnCard(r,p,qi)){ bets.push({qi,res:'void',pts:0}); return; }   // answer not on this player's card => bet cancelled, no loss
+    const ci=markCell(p,qi), win=ci!==undefined && cellState[ci]==='green', shieldHere=(p.cards||{}).shield===qi;
+    const base = ci===undefined ? 0 : (win ? 1 : (shieldHere ? 0 : -1));
+    const pts = win ? BET_WIN : BET_LOSE; betPts += pts-base; bets.push({qi,res:win?'win':'lose',pts}); });
+  return {betPts,speedPts,bets};
+}
 const CARD_KEYS = ['shield','fifty','change','streak','copy'];
 const COPY_MIN = 5;   // Copy needs at least this many OTHER players who already answered
 function markCell(p, qi){ const k = Object.keys(p.marks).find(k=>p.marks[k]===qi); return k===undefined ? undefined : +k; }
@@ -137,16 +152,19 @@ function streakActive(room, p){
 }
 // who answered each question correctly FIRST (time of the player's final tap, judged by the server clock)
 function fastMap(r){
-  const fm = {};
+  const fm = {}, speed = {};
   (r.usedIdx||[]).forEach(qi=>{
-    const q = r.questions[qi]; if(!q || q.a===undefined) return; let best=null;
+    const q = r.questions[qi]; if(!q || q.a===undefined) return; let best=null; const list=[]; const fast=isFastQ(r,qi);
     for (const [n,p] of Object.entries(r.players)){
       const ci = markCell(p,qi); if (ci===undefined || q.a!==p.card[ci]) continue;
       const ts = (p.markTs||{})[qi]; if (ts==null) continue;
+      if (fast){ if(!(p.bets&&p.bets[qi])) list.push({n,ts,j:p.joinedAt}); continue; }
       if (!best || ts<best.ts || (ts===best.ts && p.joinedAt<best.j)) best={n,ts,j:p.joinedAt};
     }
-    if (best) fm[qi]=best.n;
+    if (fast){ list.sort((x,y)=>x.ts-y.ts||x.j-y.j); speed[qi]=list.slice(0,SPEED_PTS.length).map(x=>x.n); }
+    else if (best) fm[qi]=best.n;
   });
+  fm.__speed = speed;
   return fm;
 }
 
@@ -173,8 +191,9 @@ function playerResults(room, pname, fm){
     const slots = streakSlots(room,p);
     const slotRes = slots.map(qi=>{ const ci=markCell(p,qi); return ci===undefined ? 'miss' : (cellState[ci]==='green' ? 'ok' : 'bad'); });
     const streakOk = slots.length===STREAK_LEN && slotRes.every(x=>x==='ok');
-    Object.assign(out, { shieldSaved, fastQs, fastCount:fastQs.length, streakSlots:slots, streakRes:slotRes, streakOk, streakBonus: streakOk?STREAK_BONUS:0,
-      netScore: correctCount - (wrongCount-shieldSaved) + fastQs.length*FAST_BONUS + (streakOk?STREAK_BONUS:0) });
+    const bs = betSpeed(room,p,pname,cellState,fm);
+    Object.assign(out, { shieldSaved, fastQs, fastCount:fastQs.length, streakSlots:slots, streakRes:slotRes, streakOk, streakBonus: streakOk?STREAK_BONUS:0, betPts:bs.betPts, speedPts:bs.speedPts, betRes:bs.bets,
+      netScore: correctCount - (wrongCount-shieldSaved) + fastQs.length*FAST_BONUS + (streakOk?STREAK_BONUS:0) + bs.betPts + bs.speedPts });
   } else out.netScore = correctCount - wrongCount;
   return out;
 }
@@ -445,6 +464,7 @@ io.on('connection', (socket) => {
     for (const p of Object.values(r.players)){
       for (const ci of Object.keys(p.marks)) if (p.marks[ci]===idx) delete p.marks[ci];
       if (p.markTs) delete p.markTs[idx];
+      if (p.bets) delete p.bets[idx];
       if (p.cards) for (const k of CARD_KEYS) if (p.cards[k]===idx){ delete p.cards[k]; if(k==='change') p.changed=false; }
       p._f = null; p._c = null;
     }
@@ -489,14 +509,28 @@ io.on('connection', (socket) => {
       advanceToRevealing(code, idx);
     }, SPIN_SAFETY_MS);
   });
+  function beginQ(code, idx){
+    const rr=rooms[code]; if(!rr||rr.status!=='revealing'||rr.curIdx!==idx) return;
+    const sec = isFastQ(rr,idx) ? Math.min(rr.qSec||30, FAST_SEC) : (rr.qSec||30);
+    rr.status='question'; rr.betEnd=null; rr.timerEnd=Date.now()+sec*1000; broadcast(code);
+  }
   function advanceToRevealing(code, idx){
     const r=rooms[code]; if(!r||r.status!=='spinning'||r.curIdx!==idx) return;
-    r.status='revealing'; broadcast(code);
-    setTimeout(()=>{
-      const rr=rooms[code]; if(!rr||rr.status!=='revealing'||rr.curIdx!==idx) return;
-      rr.status='question'; rr.timerEnd=Date.now()+(rr.qSec||30)*1000; broadcast(code);
-    }, REVEAL_MS);
+    const fast = isFastQ(r,idx);
+    r.status='revealing'; r.betEnd = fast ? Date.now()+BET_MS : null; broadcast(code);
+    setTimeout(()=>beginQ(code,idx), fast ? BET_MS : REVEAL_MS);
   }
+  // Host / projector: close the Fast-Round bet window early
+  socket.on('host:skipBet', ({code}) => { const r=rooms[code]; if(!r||r.status!=='revealing'||!r.betEnd) return; beginQ(code,r.curIdx); });
+  // Player: place / cancel the Fast-Round Bet (only while the number is shown and the question is still hidden)
+  socket.on('player:bet', ({code,name,on}) => {
+    seen(code,name);
+    const r=rooms[code]; if(!r||r.status!=='revealing'||!r.betEnd||!isFastQ(r,r.curIdx)) return;
+    if (Date.now()>r.betEnd+400) return;
+    const p=r.players[name]; if(!p) return;
+    if(!p.bets) p.bets={}; if(on) p.bets[r.curIdx]=true; else delete p.bets[r.curIdx];
+    touch(socket,code,name);
+  });
   // Host's own wheel tells us exactly when its CSS animation visually finished — no guessing, no drift.
   socket.on('host:spinComplete', ({code, idx}) => { advanceToRevealing(code, idx); });
 

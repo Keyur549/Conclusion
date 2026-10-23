@@ -353,6 +353,27 @@ function markedLines(pname){
 }
 // ===== Power Cards / Fast Bonus / Bonus Streak scoring (same rules as server.js) =====
 const STREAK_LEN=3, STREAK_BONUS=10, FAST_BONUS=1;
+
+// ---- Phases / Fast-Round Bet / Top-3 speed (same rules as server.js) ----
+const PHASE_LEN = 9, BET_WIN = 10, BET_LOSE = -5, SPEED_PTS = [3,2,1], BET_MS = 8000, FAST_SEC = 20;
+function qPos(r,qi){ return (r.usedIdx||[]).indexOf(qi); }
+function isFastQ(r,qi){ const i=qPos(r,qi); return i>=0 && (i+1)%PHASE_LEN===0; }
+function betSpeed(r,p,pname,cellState,fm){
+  let betPts=0, speedPts=0; const bets=[]; const sp=(fm&&fm.__speed)||{};
+  Object.keys(sp).forEach(qi=>{ const k=(sp[qi]||[]).indexOf(pname); if(k>=0) speedPts+=SPEED_PTS[k]; });
+  Object.keys(p.bets||{}).forEach(k=>{ const qi=+k; if(!p.bets[k]) return;
+    if(!answerOnCard(r,p,qi)){ bets.push({qi,res:'void',pts:0}); return; }   // answer not on this player's card => bet cancelled, no loss
+    const ci=markCell(p,qi), win=ci!==undefined && cellState[ci]==='green', shieldHere=(p.cards||{}).shield===qi;
+    const base = ci===undefined ? 0 : (win ? 1 : (shieldHere ? 0 : -1));
+    const pts = win ? BET_WIN : BET_LOSE; betPts += pts-base; bets.push({qi,res:win?'win':'lose',pts}); });
+  return {betPts,speedPts,bets};
+}
+
+function phaseInfo(r){ const i=r.curIdx!=null?qPos(r,r.curIdx):-1, n=(r.usedIdx||[]).length, tot=Math.max(1,Math.ceil((r.questions||[]).length/PHASE_LEN));
+  const ph=i>=0?Math.floor(i/PHASE_LEN)+1:Math.floor(n/PHASE_LEN)+1; return {ph:Math.min(ph,tot),tot,fast:i>=0&&isFastQ(r,r.curIdx),k:i>=0?(i%PHASE_LEN)+1:0}; }
+function phaseDone(r){ const n=(r.usedIdx||[]).length; return n>0 && n%PHASE_LEN===0 && n<(r.questions||[]).length; }
+function phLabel(r){ const x=phaseInfo(r); return x.fast?('⚡ FAST ROUND · PHASE '+x.ph):('PHASE '+x.ph+' · પ્રશ્ન '+x.k+'/'+(PHASE_LEN-1)); }
+
 function markCell(p,qi){ const k=Object.keys(p.marks).find(k=>p.marks[k]===qi); return k===undefined?undefined:+k; }
 function answerOnCard(r,p,qi){ const q=r.questions[qi]; return !!(q&&q.a!==undefined&&p.card.includes(q.a)); }
 function streakSlotsFull(r,p){
@@ -361,12 +382,13 @@ function streakSlotsFull(r,p){
   const out=[]; for(let i=pos;i<r.usedIdx.length&&out.length<STREAK_LEN;i++){ const qi=r.usedIdx[i]; if(answerOnCard(r,p,qi)) out.push(qi); } return out;
 }
 function fastMapC(r){
-  if(r.fmS) return r.fmS; if(r._fm) return r._fm; const fm={};
-  (r.usedIdx||[]).forEach(qi=>{ const q=r.questions[qi]; if(!q||q.a===undefined) return; let best=null;
+  if(r.fmS) return r.fmS; if(r._fm) return r._fm; const fm={}, speed={};
+  (r.usedIdx||[]).forEach(qi=>{ const q=r.questions[qi]; if(!q||q.a===undefined) return; let best=null; const list=[], fast=isFastQ(r,qi);
     for(const [n,p] of Object.entries(r.players)){ const ci=markCell(p,qi); if(ci===undefined||q.a!==p.card[ci]) continue; const ts=(p.markTs||{})[qi]; if(ts==null) continue;
+      if(fast){ if(!(p.bets&&p.bets[qi])) list.push({n,ts,j:p.joinedAt}); continue; }
       if(!best||ts<best.ts||(ts===best.ts&&p.joinedAt<best.j)) best={n,ts,j:p.joinedAt}; }
-    if(best) fm[qi]=best.n; });
-  r._fm=fm; return fm;
+    if(fast){ list.sort((x,y)=>x.ts-y.ts||x.j-y.j); speed[qi]=list.slice(0,SPEED_PTS.length).map(x=>x.n); } else if(best) fm[qi]=best.n; });
+  fm.__speed=speed; r._fm=fm; return fm;
 }
 function scoreExtra(r,pname,cellState,correctCount,wrongCount){
   const p=r.players[pname], fm=fastMapC(r), cards=p.cards||{};
@@ -376,14 +398,16 @@ function scoreExtra(r,pname,cellState,correctCount,wrongCount){
   const slots=streakSlotsFull(r,p);
   const streakRes=slots.map(qi=>{ const ci=markCell(p,qi); return ci===undefined?'miss':(cellState[ci]==='green'?'ok':'bad'); });
   const streakOk=slots.length===STREAK_LEN&&streakRes.every(x=>x==='ok');
-  return {shieldSaved,fastQs,fastCount:fastQs.length,streakSlots:slots,streakRes,streakOk,streakBonus:streakOk?STREAK_BONUS:0,
-    netScore:correctCount-(wrongCount-shieldSaved)+fastQs.length*FAST_BONUS+(streakOk?STREAK_BONUS:0)};
+  const bs=betSpeed(r,p,pname,cellState,fm);
+  return {shieldSaved,fastQs,fastCount:fastQs.length,streakSlots:slots,streakRes,streakOk,streakBonus:streakOk?STREAK_BONUS:0,betPts:bs.betPts,speedPts:bs.speedPts,betRes:bs.bets,
+    netScore:correctCount-(wrongCount-shieldSaved)+fastQs.length*FAST_BONUS+(streakOk?STREAK_BONUS:0)+bs.betPts+bs.speedPts};
 }
 function cardTags(r,p,res,qi){
   const c=p.cards||{}, t=[];
   if(c.shield===qi) t.push('🛡'); if(c.fifty===qi) t.push('✂️'); if(c.change===qi) t.push('🔄'); if(c.streak===qi) t.push('🏆'); if(c.copy===qi) t.push('👥');
   const si=res.streakSlots.indexOf(qi); if(si>=0) t.push('S'+(si+1));
   if(res.fastQs.includes(qi)) t.push('⚡+1');
+  if((p.bets||{})[qi]) t.push('💰'); const bq=(res.betRes||[]).find(x=>x.qi===qi); if(bq) t.push(bq.res==='win'?'+10':bq.res==='lose'?'−5':'(Bet રદ)');
   return t.join(' ');
 }
 function playerResults(pname){
@@ -570,6 +594,7 @@ tr.g td:nth-child(3){color:#15803d;font-weight:600}tr.b td:nth-child(3){color:#b
 <div class="st"><div><b style="color:${res.netScore<0?'#dc2626':'#0f766e'}">${res.netScore}</b><span>🎯 Net Score</span></div><div><b style="color:#15803d">${res.correctCount}</b><span>✅ સાચા</span></div><div><b style="color:#dc2626">${res.wrongCount}</b><span>❌ ખોટા</span></div><div><b style="color:#b45309">${res.fastCount}</b><span>⚡ Fast</span></div><div><b style="color:#7c3aed">${res.streakBonus}</b><span>🏆 Streak</span></div><div><b style="color:#b45309">${res.correctRows}</b><span>📏 Line</span></div></div>
 <h3 style="color:#0f766e;margin:18px 0 6px">🎴 મારું 5×5 Card</h3><div class="grid">${cells5}</div>
 <table><tr><th>#</th><th>Question</th><th>તમારો જવાબ</th><th>સાચો જવાબ</th><th></th><th>⚡/Card</th></tr>${rows}</table>
+<div class="ft" style="margin-top:8px">⚡ Speed Round Bonus: +${res.speedPts||0} · 💰 Bet: ${res.betPts>0?'+':''}${res.betPts||0}</div>
 <div class="ft" style="margin-top:8px">⚡ Fast Bonus: ${res.fastCount} (+${res.fastCount}) · 🏆 Streak: ${p.cards&&p.cards.streak!=null?(res.streakOk?'સફળ +'+res.streakBonus:'સફળ ન થઈ'):'વાપરી નથી'} · 🛡 બચાવ: ${res.shieldSaved}</div>
 <div class="ft">Net Score = સાચા − ખોટા + ⚡ Fast + 🏆 Streak · Room ${esc(r.code)}</div><button class="pr" onclick="window.print()">🖨 Print / PDF</button></div></body></html>`;
   const b=new Blob([html],{type:'text/html'}); const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download='my-report.html'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href),5000);
@@ -715,7 +740,7 @@ function scMsgWith(M){
   const missed=res.cellState.filter(x=>x==='yellow').length;
   const claims=Object.values(pl.claims||{}), invalid=claims.filter(c=>c.valid===false).length;
   const wins=['line1','line2','line3','line4','line5','full','top3','top2','top1'].some(k=>w[k]===state.name);
-  const L=M.levels; let ti=L.length-1; for(let i=0;i<L.length-1;i++){ if(n>=Number(L[i].min)){ ti=i; break; } }
+  const L=M.levels; const _old=[25,20,15,10,1,0], _same=_old.every((v,i)=>Number(L[i].min)===v), _mins=_same?[32,24,17,10,3,0]:L.map(l=>Number(l.min)); let ti=L.length-1; for(let i=0;i<L.length-1;i++){ if(n>=_mins[i]){ ti=i; break; } }
   const lv=L[ti], T=M.tips;
   const tips=[];
   if(res.wrongCount>=3) tips.push(fill(T.manyWrong,res.wrongCount)); else if(res.wrongCount>0) tips.push(fill(T.fewWrong,res.wrongCount));
@@ -901,16 +926,22 @@ function render(){
   let body=profileHdr(r,p)+zoneBattleHTML(r,p)+(typeof certBtn==='function'?certBtn(r):'');
   if(r.status==='lobby'||r.status==='active') body+=`<div class="card">Host ની રાહ જુઓ…<div style="margin-top:8px"><button class="btn ghost" onclick="pracOpen()">🧪 Practice કરો (3 નકલી પ્રશ્ન)</button></div></div>`;
   if(r.status==='spinning') body+=`<div class="card"><div class="qtext">🎡 Host Wheel Spin કરી રહ્યા છે...</div></div>`;
-  if(r.status==='revealing') body+=`<div class="card numpop"><div class="lbl">🎯 Question Number</div><div class="num">${r.curIdx+1}</div></div>`;
+  if(r.status==='revealing'){ const ph=phaseInfo(r);
+    if(ph.fast&&r.betEnd){ const left=Math.max(0,Math.ceil((r.betEnd-Date.now())/1000)), on=!!(p.bets&&p.bets[r.curIdx])||state.betQ===r.curIdx&&state.betOn;
+      body+=`<div class="card numpop" style="border:3px solid #f59e0b"><div class="lbl">⚡ FAST ROUND · PHASE ${ph.ph}</div><div class="num">${r.curIdx+1}</div><div class="muted">પ્રશ્ન હજી છુપો છે! Bet લગાવવાનો સમય: <b>${left}s</b></div>
+      <div style="margin:10px 0;font-weight:700">💰 5 ની Bet: જવાબ સાચો → <span style="color:#16a34a">+10</span> · ખોટો / ન આપ્યો → <span style="color:#dc2626">−5</span><br><small class="muted">(જવાબ તમારા Card માં ન હોય તો Bet આપોઆપ રદ — કોઈ નુકસાન નહિ. Bet હોય તો ⚡ Speed Bonus ન મળે.)</small></div>
+      <button class="btn" style="${on?'background:#16a34a':'background:linear-gradient(135deg,#f59e0b,#dc2626)'}" onclick="placeBet(${on?'false':'true'})">${on?'✅ Bet લગાવી છે (રદ કરવા દબાવો)':'💰 Bet લગાવો'}</button></div>`; }
+    else body+=`<div class="card numpop"><div class="lbl">${esc(phLabel(r))}</div><div class="num">${r.curIdx+1}</div></div>`; }
   if(r.status==='question'){
     const remain=r.paused?Math.ceil((r.pausedMs||0)/1000):Math.max(0,Math.ceil((r.timerEnd-Date.now())/1000));
+    body+=`<div class="card" style="text-align:center;font-weight:800;color:${phaseInfo(r).fast?'#b45309':'#0f766e'}">${esc(phLabel(r))}${phaseInfo(r).fast&&p.bets&&p.bets[r.curIdx]?' · 💰 Bet લગાવી છે':''}</div>`;
     body+=`<div class="card"><div class="qtext">${esc(r.questions[r.curIdx].q)}</div>${r.questions[r.curIdx].img?`<img src="${esc(r.questions[r.curIdx].img)}" style="max-width:100%;max-height:260px;border-radius:12px;margin:8px auto;display:block" onerror="this.style.display='none'">`:''}${qaBtn(r.questions[r.curIdx])}<div class="timer">${remain}s${r.paused?' ⏸':''}</div>${r.paused?'<div class="qtext" style="text-align:center;background:#fff3b0">⏸ Game થોભાવ્યું છે — થોડી રાહ જુઓ</div>':''}
     <button class="btn secondary" onclick='speakQuestion(${JSON.stringify(r.questions[r.curIdx].q)},true)'>🔊 સાંભળો</button>
     <button class="btn ghost" onclick="toggleAudio()">${audioOn?'🔊 Auto On':'🔇 Auto Off'}</button>
     <div class="muted">તમારા card માં જવાબ શોધીને click કરો.</div></div>`;
   }
   if(['question','locked','spinning','revealing','active'].includes(r.status)) body+=`<div class="card">${powerHTML(r,p)}</div>`;
-  if(r.status==='locked') body+=`<div class="card muted">⏱ સમય પૂરો — next question ની રાહ જુઓ.</div>`;
+  if(r.status==='locked') body+=phaseDone(r)?`<div class="card" style="text-align:center;font-weight:800">🏁 PHASE ${phaseInfo(r).ph} પૂરો!<div class="muted">હવે PHASE ${Math.floor((r.usedIdx||[]).length/PHASE_LEN)+1} ની રાહ જુઓ — Host શરૂ કરશે.</div></div>`:`<div class="card muted">⏱ સમય પૂરો — next question ની રાહ જુઓ.</div>`;
   if(r.status==='ended') body+=`<div class="card muted">Game પૂરી — results ની રાહ જુઓ.</div>`;
 
   let cellState=Array(25).fill(null);
@@ -961,7 +992,7 @@ function render(){
     <div style="text-align:center;margin:8px 0 12px;padding:14px;border-radius:16px;background:${res.netScore<0?'#fee2e2':'#dcfce7'}">
       <div style="font-size:.95rem;font-weight:700;color:#444">🎯 Net Score</div>
       <div style="font-size:4.2rem;line-height:1.1;font-weight:900;color:${res.netScore<0?'#dc2626':'#16a34a'}">${res.netScore}</div>
-      <div class="muted">✅ ${res.correctCount} સાચા − ❌ ${res.wrongCount-res.shieldSaved} ખોટા${res.shieldSaved?' (🛡 Shield એ −1 બચાવ્યો)':''} + ⚡ ${res.fastCount} Fast + 🏆 ${res.streakBonus} Streak</div>
+      <div class="muted">✅ ${res.correctCount} સાચા − ❌ ${res.wrongCount-res.shieldSaved} ખોટા${res.shieldSaved?' (🛡 Shield એ −1 બચાવ્યો)':''} + ⚡ ${res.fastCount} Fast + 🏆 ${res.streakBonus} Streak${res.speedPts?' + ⚡ '+res.speedPts+' Speed Round':''}${res.betPts?' '+(res.betPts>0?'+':'−')+' 💰 '+Math.abs(res.betPts)+' Bet':''}</div>
       ${p.cards&&p.cards.streak!=null?`<div style="font-weight:800;margin-top:4px">🏆 Bonus Streak: ${res.streakOk?'✅ સફળ! +'+res.streakBonus:'❌ સફળ ન થઈ'} <span class="muted">(${res.streakRes.map((x,i)=>'Q'+(res.streakSlots[i]+1)+(x==='ok'?' ✅':x==='bad'?' ❌':' ✘')).join(' · ')||'પ્રશ્નો પૂરા ન થયા'})</span></div>`:''}
       <button class="btn" style="margin-top:10px" onclick="reportHtmlMine()">⬇ મારો Report Download કરો</button></div>
     <table class="stbl">
@@ -978,7 +1009,8 @@ function render(){
   el.__last=body;
   el.innerHTML=body;
 }
-setInterval(()=>{ if(state.room && state.room.status==='question') render(); },1000);
+function placeBet(on){ const r=state.room; if(!r) return; state.betQ=r.curIdx; state.betOn=!!on; socket.emit('player:bet',{code:state.code,name:state.name,on:!!on}); render(); }
+setInterval(()=>{ if(state.room && (state.room.status==='question'||state.room.status==='revealing')) render(); },1000);
 render();
 if('serviceWorker' in navigator){ navigator.serviceWorker.getRegistrations().then(rs=>rs.forEach(r=>r.unregister())); caches && caches.keys && caches.keys().then(ks=>ks.forEach(k=>caches.delete(k))); }
 </script>
